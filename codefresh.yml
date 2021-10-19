@@ -1,0 +1,329 @@
+# More examples of Codefresh YAML can be found at
+# https://codefresh.io/docs/docs/yaml-examples/examples/
+
+version: "1.0"
+# Stages can help you organize your steps in stages
+stages:
+  - "init"
+  - "canary_release"
+  - "prod_release"
+  - "monitoring_after_release"
+
+steps:
+  ############ Init ############
+  CFExportPR:
+    title: Export CF_PR_ ENV vars
+    image: r6by/cf-github-pr-export:0.2.1
+  check_jira_approval:
+    title: Check Jira ticket Approval
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "init"
+    commands:
+      - echo todo
+  # 1. Checkout Repo
+  clone_gitops:
+    stage: "init"
+    title: Checkout k8s Repo
+    type: git-clone
+    arguments:
+      repo: '${{CF_REPO_OWNER}}/${{CF_REPO_NAME}}'
+      git: github
+      revision: master
+  # 2. Create branch to merge canary/prod change to master
+  create_branch:
+    title: Create a feature branch
+    image: alpine/git:latest
+    working_directory: "${{clone_gitops}}"
+    commands:
+      - git branch '${{TAG_NUMBER}}' # TODO can be random value or release date?
+      - git checkout '${{TAG_NUMBER}}' # TODO
+    stage: "init"
+    when:
+      steps:
+        all:
+          - name: clone_gitops
+            on:
+              - success
+    # 3. Extract tag from repo and show confirmation
+    # TODO
+  # 4. Commit
+  update_gitops:
+    title: Update canary/prod k8s manifest on the feature branch
+    type: freestyle
+    image: "mikefarah/yq"
+    working_directory: "${{clone_gitops}}" #Running command where code cloned
+    stage: "init"
+    commands:
+      - cat overlays/dev/kustomization.yaml
+      - IMAGE='${{TAG_NUMBER}}' yq e -i '.images[0].newTag=strenv(IMAGE)' overlays/dev/kustomization.yaml
+      - cat overlays/dev/kustomization.yaml
+    when:
+      steps:
+        - name: create_branch
+          on:
+            - success
+  commit_to_gitops:
+    title: Commit the changes to the feature branch
+    type: dimag/git-commit
+    working_directory: "${{clone_gitops}}"
+    arguments:
+      GITHUB_REPO_OWNER: '${{CF_REPO_OWNER}}'
+      GITHUB_REPO_NAME: '${{CF_REPO_NAME}}'
+      GIT_PROVIDER_NAME: github
+      COMMIT_MESSAGE: "update image with tag '${{TAG_NUMBER}}' to dev"
+    stage: "init"
+    when:
+      steps:
+        all:
+          - name: update_gitops
+            on:
+              - success
+  create_github_pr:
+    title: Create the feature branch pr on master branch
+    type: github-pr
+    working_directory: "${{clone_gitops}}"
+    stage: "init"
+    arguments:
+      GITHUB_TOKEN: '${{GITHUB_TOKEN}}'
+      GITHUB_REPO_OWNER: '${{CF_REPO_OWNER}}'
+      GITHUB_REPO_NAME: '${{CF_REPO_NAME}}'
+      HEAD: '${{TAG_NUMBER}}'
+      TITLE: 'Codefresh PR for ${{TAG_NUMBER}}'
+      GITHUB_PR_NUMBER: '${{TAG_NUMBER}}'
+      BASE: master
+    when:
+      steps:
+        all:
+          - name: commit_to_gitops
+            on:
+              - success
+  merge_github_pr:
+    title: Merge to master
+    type: github-pr
+    stage: "init"
+    arguments:
+      GITHUB_TOKEN: '${{GITHUB_TOKEN}}'
+      GITHUB_REPO_OWNER: '${{CF_REPO_OWNER}}'
+      GITHUB_REPO_NAME: '${{CF_REPO_NAME}}'
+      GITHUB_PR_NUMBER: '${{PR_NUMBER}}' # TODO ideally this should be set programatically
+      GITHUB_PR_OPERATION: merge
+
+  create_github_pr_to_pay2release:
+    title: Create pr from master to pay2release
+    type: github-pr
+    fail_fast: false
+    working_directory: "${{clone_gitops}}"
+    stage: "init"
+    arguments:
+      GITHUB_TOKEN: '${{GITHUB_TOKEN}}'
+      GITHUB_REPO_OWNER: '${{CF_REPO_OWNER}}'
+      GITHUB_REPO_NAME: '${{CF_REPO_NAME}}'
+      HEAD: master
+      TITLE: 'Release' # TODO set date
+      GITHUB_PR_NUMBER: '${{TAG_NUMBER}}' # TODO ideally this should be set programatically
+      base: main # TODO should be pay2release (ask po to create pay2release branch
+  pr_checker:
+    title: Check Kustomize Build
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "init"
+    commands:
+      - echo todo
+
+  ############ Canary Release ############
+  # 1. comment '/canary_release'
+  add_canary_release_comment:
+    title: Type '/canary_release'
+    type: kostis-codefresh/github-pr-comment
+    fail_fast: false
+    stage: "canary_release"
+    arguments:
+      PR_COMMENT_TEXT: /canary_release
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+  check_argo_cd_status:
+    title: Check Argo CD status
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "canary_release"
+    commands:
+      - echo todo
+  check_automated_qa_status:
+    title: Check Automated QA status
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "canary_release"
+    commands:
+      - echo todo
+  ############ Prod Release ############
+  # 1. Show confirmation to proceed
+  confirmation_before_prod_release:
+    type: pending-approval
+    title: Is manual verification done? Approve to prod relase or Deny to rollback
+    stage: "prod_release"
+    fail_fast: false # Required to invoke callback for reject
+    timeout:
+      duration: 20
+      finalState: denied
+      timeUnit: minutes
+  canary_rollback:
+    title: Type '/canary_rollback'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /canary_rollback
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - denied
+  check_argo_cd_rollback_status_for_canary_rollback:
+    title: Check Argo CD status
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "prod_release"
+    commands:
+      - echo todo
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - denied
+  unlock_after_canary_rollback:
+    title: Type '/unlock'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /unlock
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - denied
+
+  # 2. Comment '/pass_manual_test'
+  pass_manual_test:
+    title: Type '/pass_manual_test'
+    type: kostis-codefresh/github-pr-comment
+    fail_fast: false
+    stage: "prod_release"
+    arguments:
+      PR_COMMENT_TEXT: /pass_manual_test
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - approved
+  # 3. Comment '/prod_release'
+  prod_release:
+    title: Type '/prod_release'
+    type: kostis-codefresh/github-pr-comment
+    stage: "prod_release"
+    arguments:
+      PR_COMMENT_TEXT: /prod_release
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # Todo
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - approved
+  check_argo_cd_status_prod:
+    title: Check Argo CD status
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "prod_release"
+    commands:
+      - echo todo
+    when:
+      steps:
+        - name: confirmation_before_prod_release
+          on:
+            - approved
+  ############ After-release monitoring ############
+  # 1. Show prompt
+  monitoring_after_release:
+    type: pending-approval
+    title: Is release successfully done? Click reject if you want to rollback
+    stage: "monitoring_after_release"
+    fail_fast: false # Required to invoke callback for reject
+    timeout:
+      duration: 10
+      finalState: approved
+      timeUnit: minutes
+    when:
+      steps:
+        - name: prod_release
+          on:
+            - success
+  unlock:
+    title: Type '/unlock'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /unlock
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: monitoring_after_release
+          on:
+            - approved
+  prod_rollback:
+    title: Type '/prod_rollback'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /prod_rollback
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: monitoring_after_release
+          on:
+            - denied
+  canary_rollback_after_prod_rollback:
+    title: Type '/canary_rollback'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /canary_rollback
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: monitoring_after_release
+          on:
+            - denied
+  check_argo_cd_rollback_status_for_prod_rollback:
+    title: Check Argo CD status
+    type: freestyle
+    image: "mikefarah/yq"
+    stage: "monitoring_after_release"
+    commands:
+      - echo todo
+    when:
+      steps:
+        - name: monitoring_after_release
+          on:
+            - denied
+  unlock_after_rollback:
+    title: Type '/unlock'
+    type: kostis-codefresh/github-pr-comment
+    stage: "monitoring_after_release"
+    arguments:
+      PR_COMMENT_TEXT: /unlock
+      GIT_PROVIDER_NAME: github
+      CF_PULL_REQUEST_NUMBER: 17 # TODO set this programatically somehow
+    when:
+      steps:
+        - name: monitoring_after_release
+          on:
+            - denied
